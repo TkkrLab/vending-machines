@@ -30,9 +30,10 @@
 
 /* Select one of the following hardware configurations (or add your own down below) */
 
-#define HW_VENDO     //(Vendo 75 5 slots can machine)
+//#define HW_VENDO     //(Vendo 75 5 slots can dispenser)
 //#define HW_CANDY3  //(Candy machine drawer with 3 slots)
 //#define HW_CANDY6  //(Candy machine drawer with 6 slots)
+#define HW_VENDO_I2C // Vendo 75 5 slots can dispenser, new hardware)
 
 /* Configure the hardware ID of this device. The ID must be unique within each vending machine */
 
@@ -40,7 +41,12 @@
 
 //-------------------------
 
-//Do not change anything below this line.
+//Do not change anything below this line
+
+#ifdef HW_VENDO_I2C
+#include "PCF8574.h"
+PCF8574 motorOutputs(0x20);
+#endif
 
 #ifdef HW_CANDY3
   #define NEOPIXELS_PIN 8
@@ -95,6 +101,25 @@
   const uint8_t switches[] = {SWITCH1_PIN, SWITCH2_PIN, SWITCH3_PIN, SWITCH4_PIN, SWITCH5_PIN};
   const uint8_t empty[]    = {EMPTY1_PIN,  EMPTY2_PIN,  EMPTY3_PIN,  EMPTY4_PIN,  EMPTY5_PIN};
 #endif
+#ifdef HW_VENDO_I2C
+  #define MOTORS_AMOUNT 5
+  #define SWITCH1_PIN 5
+  #define SWITCH2_PIN 6
+  #define SWITCH3_PIN 7
+  #define SWITCH4_PIN 8
+  #define SWITCH5_PIN 9
+  #define EMPTY1_PIN A0
+  #define EMPTY2_PIN A1
+  #define EMPTY3_PIN A2
+  #define EMPTY4_PIN A3
+  #define EMPTY5_PIN 4
+  #define ONEWIRE_INSIDE 16
+  #define ONEWIRE_INSIDE 14
+  const uint8_t switches[] = {SWITCH1_PIN, SWITCH2_PIN, SWITCH3_PIN, SWITCH4_PIN, SWITCH5_PIN};
+  const uint8_t empty[]    = {EMPTY1_PIN,  EMPTY2_PIN,  EMPTY3_PIN,  EMPTY4_PIN,  EMPTY5_PIN};
+  #define USE_TXLED
+  #define USE_RXLED
+#endif
 
 #include <Adafruit_NeoPixel.h>
 
@@ -128,6 +153,19 @@ Adafruit_NeoPixel strip = Adafruit_NeoPixel(NEOPIXELS_AMOUNT, NEOPIXELS_PIN, NEO
 unsigned long startTime;
 
 bool moveChannel(uint8_t channel, bool mode = false) {
+#ifdef HW_VENDO_I2C
+  motorOutputs.write(channel, LOW);
+  startTime = millis();
+  while(digitalRead(switches[channel]) == mode) {
+    unsigned long currentTime = millis();
+    if (currentTime - startTime >= TIMEOUT) {
+      motorOutputs.write(channel, HIGH);
+      return false;
+    }
+  }
+  motorOutputs.write(channel, HIGH);
+  return true;
+#else
   digitalWrite(motors[channel], HIGH);
   startTime = millis();
   while(digitalRead(switches[channel]) == mode) {
@@ -139,28 +177,56 @@ bool moveChannel(uint8_t channel, bool mode = false) {
   }
   digitalWrite(motors[channel], LOW);
   return true;
+#endif
 }
 
 void halt() {
   Serial.println("#Halting...");
   for (uint8_t i = 0; i<MOTORS_AMOUNT; i++) {
+    #ifdef HW_VENDO_I2C
+    motorOutputs.write(i, HIGH);
+    #else
     digitalWrite(motors[i], LOW);
+    #endif
   }
   Serial.println("state=halted");
-  Serial.println("#!!! HALTED !!!");
+  Serial.println("#Hardware error, Arduino halted");
   #ifdef NEOPIXELS_PIN
   for (uint8_t i = 0; i<NEOPIXELS_AMOUNT; i++) {
     strip.setPixelColor(i, (uint32_t) 0x00FF0000);
   }
   strip.show();
   #endif
-  while(1);
+  while(1) {
+      delay(100);
+      #ifdef USE_TXLED
+      PORTD |= 1 << 5;
+      #endif
+      #ifdef USE_RXLED
+      PORTB &= ~(1 << 0);
+      #endif
+      delay(100);
+      #ifdef USE_TXLED
+      PORTD &= ~(1 << 5);
+      #endif
+      #ifdef USE_RXLED
+      PORTB |= 1 << 0;
+      #endif
+  }
 }
 
 void setup() {
+#ifdef HW_VENDO_I2C
+  motorOutputs.begin();
+#endif
+  
   for (uint8_t i = 0; i<MOTORS_AMOUNT; i++) {
     pinMode(switches[i], INPUT_PULLUP);
+    #ifdef HW_VENDO_I2C
+    motorOutputs.write(i, HIGH);
+    #else
     pinMode(motors[i], OUTPUT);
+    #endif
     #ifdef EMPTY1_PIN
       pinMode(empty[i], INPUT_PULLUP);
     #endif
@@ -212,6 +278,7 @@ void sendEmpty() {
 }
 
 bool prevBusy = false;
+bool prevBlink = false;
 void loop() {
  while (Serial.available()>0) {
       char c = Serial.read();
@@ -294,6 +361,16 @@ void loop() {
   if (currentMillis - previousMillis > interval) {
     previousMillis = currentMillis;
 
+    #ifdef USE_TXLED
+    if (prevBlink) {
+      PORTD |= 1 << 5;
+      prevBlink = false;
+    } else {
+      PORTD &= ~(1 << 5);
+      prevBlink = true;
+    }
+    #endif
+
     bool busy = false;
     for (uint8_t i = 0; i<MOTORS_AMOUNT; i++) {
       if (state[i]!=STATE_IDLE) {
@@ -316,7 +393,11 @@ void loop() {
         case STATE_STARTING:
           startTime = millis();
           state[i] = STATE_WAIT1;
-          digitalWrite(motors[i], HIGH); //Start motor
+          #ifdef HW_VENDO_I2C
+            motorOutputs.write(i, LOW);
+          #else
+            digitalWrite(motors[i], HIGH); //Start motor
+          #endif
           Serial.println("#Preparing to vend product "+String(i)+"...");
           break;
         case STATE_WAIT1:
@@ -345,7 +426,11 @@ void loop() {
           //Wait until button gets pressed
           if (!digitalRead(switches[i])) {
             state[i] = STATE_IDLE;
-            digitalWrite(motors[i], LOW);
+           #ifdef HW_VENDO_I2C
+              motorOutputs.write(i, HIGH);
+            #else
+              digitalWrite(motors[i], LOW);
+            #endif
             Serial.println("#Vending product "+String(i)+" completed.");
           }else if (millis() - startTime >= TIMEOUT) {
             Serial.println("state=error");
@@ -357,13 +442,21 @@ void loop() {
           if (correctioncounter[i]>1) {
             state[i] = STATE_IDLE;
             correctioncounter[i] = 0;
-            digitalWrite(motors[i], LOW);
+           #ifdef HW_VENDO_I2C
+              motorOutputs.write(i, HIGH);
+            #else
+              digitalWrite(motors[i], LOW);
+            #endif
             Serial.println("#Corrected "+String(i)+".");
           } else {
             Serial.println("state=correcting");
             Serial.println("corr="+String(i)+","+String(correctioncounter[i]));
             Serial.println("#Correcting "+String(i)+": "+String(correctioncounter[i])+"....");
-            digitalWrite(motors[i], HIGH);
+           #ifdef HW_VENDO_I2C
+              motorOutputs.write(i, LOW);
+            #else
+              digitalWrite(motors[i], HIGH);
+            #endif
           }
           correctioncounter[i]++;
       }
